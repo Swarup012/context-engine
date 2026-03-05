@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "context-engine-mcp",
+      "args": [],
+      "env": {
+        "ANTHROPIC_API_KEY": "your-anthropic-api-key-here"
+      }
+    }
+  }
+}
