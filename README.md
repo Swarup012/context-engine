@@ -37,15 +37,14 @@ the right context. Nothing irrelevant. Nothing missing.
 
 ---
 
-## About
-[Install](#quick-start)
-[Usage](#using-with-cursor)
-[Demo](#see-it-in-action)
-[Requirements](#requirements)
-[Configuration](#configuration)
-[Troubleshooting](#troubleshooting)
-[License](#license)
-[Contributing](#contributing)
+## Table of Contents
+1. [Install](#quick-start)
+2. [Usage](#using-with-cursor)
+3. [Demo](#see-it-in-action)
+4. [Requirements](#requirements)
+5. [Configuration](#configuration)
+6. [Troubleshooting](#troubleshooting)
+7. [License](#license)
 
 ## See It In Action
 ```bash
