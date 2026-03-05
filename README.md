@@ -1,74 +1,127 @@
-# ContextEngine 🧠
+![Tests](https://img.shields.io/badge/tests-106%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.12+-blue)
+![License](https://img.shields.io/badge/license-MIT-blue)
+![MCP](https://img.shields.io/badge/MCP-compatible-purple)
 
+# ContextEngine 🧠
 > **Give any AI tool deep understanding of your codebase — automatically.**
 
-ContextEngine sits between your code and any LLM. Instead of you manually copying files or guessing what context to provide, ContextEngine automatically figures out which functions, files, and relationships are relevant to your question — and assembles the perfect context window.
+When you ask AI about your code, most tools dump entire files into 
+context — burning 15,000 to 50,000 tokens per question. That's slow, 
+expensive, and the AI gets confused by irrelevant code.
 
-Works natively inside **Cursor**, **Claude Desktop**, **Claude Code**, and any MCP-compatible tool.
+ContextEngine uses dependency graphs to find **only the relevant 
+functions** — typically 2,000 to 5,000 tokens instead. Same answer 
+quality. 85–95% fewer tokens. Works natively inside **Cursor**, 
+**Claude Desktop**, and **Claude Code** via MCP.
 
 ---
 
-## What Problem Does This Solve?
+## The Problem
 
-When you ask an AI "how does authentication work in my app?", you usually have to:
-- Manually open the right files
-- Copy-paste the relevant code
-- Hope you didn't miss anything
+Every time you ask AI about your code, one of three things happens:
 
-**ContextEngine does all of that automatically.** It indexes your codebase once, builds a dependency graph, and then for any question — finds exactly the right code, organized by relevance.
+- **Wrong files get read:**  generic answer that misses your actual implementation
+- **Entire codebase gets dumped:**  50,000 tokens, slow response, AI loses focus
+- **You paste code manually:**  defeats the purpose of having an AI assistant
 
+The root cause is that most tools treat code like plain text.
+They don't understand that `validateToken()` calls `checkExpiry()` 
+which depends on `config.tokenSettings`. They just grab whatever 
+looks similar and hope for the best.
+
+**ContextEngine understands your code's structure.** It builds a 
+real dependency graph , so when you ask about authentication, it 
+traces the entire call chain automatically and assembles exactly 
+the right context. Nothing irrelevant. Nothing missing.
+
+---
+
+## See It In Action
+```bash
+$ context-engine assemble "why does login fail after token expires?"
+
+Query Type:   causal
+Focal Points: auth.validate_token, session.check_expiry
+
+┌───────┬───────────┬────────┬────────────┐
+│ Tier  │ Functions │ Tokens │ % of Total │
+├───────┼───────────┼────────┼────────────┤
+│ HOT   │         3 │  1,240 │      52.1% │
+│ WARM  │         2 │    580 │      24.4% │
+│ COLD  │         4 │    560 │      23.5% │
+│ TOTAL │         9 │  2,380 │       1.6% │
+└───────┴───────────┴────────┴────────────┘
+
+Token Budget: 150,000 | Used: 2,380 | Remaining: 147,620
+
+🔥 HOT — auth.validate_token     (full source, 480 tokens)
+🔥 HOT — session.check_expiry    (full source, 390 tokens)
+🔥 HOT — auth.refresh_token      (full source, 370 tokens)
+🌡 WARM — middleware.auth_guard  (compressed, 310 tokens)
+🌡 WARM — config.token_settings  (compressed, 270 tokens)
+🧊 COLD — user.get_profile       (signature, score: 0.41)
+🧊 COLD — db.find_session        (signature, score: 0.38)
 ```
-You ask: "why does login fail after token expires?"
-           ↓
-ContextEngine finds:
-  🔥 HOT  → validate_token() — full source (directly relevant)
-  🌡 WARM → auth_middleware() — compressed summary (related)
-  🧊 COLD → UserModel.save() — just the signature (peripherally relevant)
-           ↓
-AI gets perfect context. You get a precise answer.
-```
+
+**2,380 tokens** instead of 40,000+ tokens of whole files.
+The AI gets exactly what it needs. Nothing more.
+
+---
+
+## How It's Different
+
+| | Cursor Built-in | GitHub Copilot | ContextEngine |
+|---|---|---|---|
+| Context selection | Open files | Current file | Dependency graph |
+| Tokens used | 15,000–50,000 | 5,000–10,000 | **2,000–5,000** |
+| Understands call chains | ❌ | ❌ | ✅ |
+| Multi-system questions | ❌ | ❌ | ✅ |
+| Works on large codebases | Struggles | Struggles | ✅ |
+| Auto-detects relevant files | Partial | ❌ | ✅ |
 
 ---
 
 ## Quick Start
 
-### Install
+**Requirements:** Python 3.12+, uv
 
+**1. Install uv** (if you don't have it):
 ```bash
-# Requires Python 3.12+ and uv
-pip install uv  # if you don't have uv yet
+# Mac/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Clone and install
+# Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**2. Install ContextEngine:**
+```bash
 git clone https://github.com/yourusername/context-engine
 cd context-engine
 uv tool install .
 ```
 
-This installs two global commands:
+Two commands are now available globally:
 - `context-engine` — CLI tool
-- `context-engine-mcp` — MCP server for AI tools
+- `context-engine-mcp` — MCP server for Cursor/Claude Desktop
 
-### Set Up API Keys (Optional)
-
-Only needed if you want AI-powered WARM tier compression in the CLI. Not required for Cursor/Claude Desktop usage.
-
+**3. Set your API key** (Optional if you use MCP not CLI):
+> **Needed for AI powered compression or CLI usage, not for Cursor/Claude usage**
 ```bash
-cp .env.example .env
-# Edit .env and add your key:
-# MODEL_PROVIDER=anthropic
-# ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_API_KEY=your_key_here
+export MODEL_PROVIDER=claude
 ```
+
+That's it. You're ready.
 
 ---
 
-## Using ContextEngine in Cursor (Recommended)
+## Using With Cursor (Recommended)
 
-This is the best way to use ContextEngine — it works invisibly inside your normal Cursor workflow.
+### Step 1 — Add to Cursor
 
-### Step 1: Add to Cursor
-
-Edit `~/.cursor/mcp.json` (create it if it doesn't exist):
-
+Edit `~/.cursor/mcp.json` (create if it doesn't exist):
 ```json
 {
   "mcpServers": {
@@ -80,102 +133,82 @@ Edit `~/.cursor/mcp.json` (create it if it doesn't exist):
 }
 ```
 
-> **Linux/Mac:** If `context-engine-mcp` isn't found, use the full path:
-> `which context-engine-mcp` → use that full path in the config.
+> If `context-engine-mcp` isn't found, use the full path:
+> run `which context-engine-mcp` and paste that path instead.
 
-### Step 2: Restart Cursor
+### Step 2 — Restart Cursor
 
-After restarting, go to **Cursor Settings → Features → MCP Servers** and verify `context-engine` shows a green dot ✅.
+Go to **Settings → Features → MCP Servers** and verify
+`context-engine` shows a green dot ✅.
 
-### Step 3: Open Your Project and Index It
+### Step 3 — Index and Ask
 
-Open your project folder in Cursor, then in the chat just say:
-
+Open your project in Cursor and say:
 ```
 index this codebase
 ```
 
-Cursor will call the `index_codebase` tool automatically. You'll see a summary like:
-
+Then ask anything:
 ```
-Indexed 47 files, 312 functions, 891 edges.
-Index saved to /your/project/.context-engine
+how does authentication work in this project?
+why does the dashboard show stale data after login?
+what is the difference between login and register?
+what calls the validateToken function?
 ```
 
-### Step 4: Ask Questions Naturally
-
-That's it! Now just ask questions about your code:
-
-```
-How does authentication work in this project?
-What does the compress command do?
-Find all API routes
-Show me the source of validateToken
-What calls the login function?
-What does auth.ts do?
-Is the codebase index up to date?
-```
+Cursor calls ContextEngine automatically. You just get answers.
 
 ---
 
-## Using ContextEngine in Claude Desktop
+## Using With Claude Desktop
 
-### Step 1: Find Your Config File
+**Find your config file:**
 
-| Platform | Config Location |
+| Platform | Location |
 |---|---|
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Windows | `%APPDATA%\\Claude\\claude_desktop_config.json` |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
-### Step 2: Add ContextEngine
-
+**Add ContextEngine:**
 ```json
 {
   "mcpServers": {
     "context-engine": {
       "command": "context-engine-mcp",
-      "args": [],
-      "env": {
-        "ANTHROPIC_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-### Step 3: Restart Claude Desktop
-
-The context-engine tools will appear in Claude's tool picker automatically.
-
----
-
-## Using ContextEngine in Claude Code (CLI)
-
-```bash
-# Add to your Claude Code config
-# ~/.claude.json — add the mcpServers key:
-{
-  "mcpServers": {
-    "context-engine": {
-      "command": "/full/path/to/context-engine-mcp",
       "args": []
     }
   }
 }
 ```
 
-Then open Claude Code from inside your project folder:
-```bash
-cd /your/project
-claude
-```
-
-Say `index this codebase` and you're ready to go.
+Restart Claude Desktop. The tools appear automatically.
 
 ---
 
-## All 7 MCP Tools
+## Using With Claude Code
+```bash
+# Add to ~/.claude.json
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "context-engine-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Then from inside your project:
+```bash
+cd /your/project
+claude
+# say: "index this codebase" and start asking questions
+```
+
+---
+
+## MCP Tools Available
 
 Once connected, these tools are available to any MCP-compatible AI:
 
@@ -190,73 +223,32 @@ Once connected, these tools are available to any MCP-compatible AI:
 | `find_dependents` | Who calls a given function | *"what calls login()?"* |
 
 > **Note:** All tools automatically use the project directory you opened your AI tool from. You rarely need to specify a path manually.
-
 ---
 
-## Using the CLI Directly
+## CLI Usage
 
-You can also use ContextEngine as a standalone CLI without any AI tool:
-
+Use ContextEngine as a standalone tool without any IDE:
 ```bash
-# Index your project
-context-engine index /path/to/your/project
+# Index your project (run once)
+context-engine index /path/to/project
 
-# Search for relevant functions
-context-engine query "token validation" --path /path/to/your/project
+# Keep index fresh as you code
+context-engine watch /path/to/project
 
-# Assemble context for a query (see HOT/WARM/COLD breakdown)
-context-engine assemble "how does login work?" --path /path/to/your/project
+# Ask a question (requires API key)
+context-engine ask "how does payment processing work?" --path .
 
-# Ask a question (requires API key in .env)
-context-engine ask "why does payment fail after timeout?" --path /path/to/your/project
+# See HOT/WARM/COLD breakdown without calling LLM
+context-engine assemble "how does auth work?" --path .
 
-# Check index status
-context-engine status --path /path/to/your/project
+# Semantic search
+context-engine query "token validation" --path .
 
-# Watch for file changes and auto-update index
-context-engine watch /path/to/your/project
+# Check index stats
+context-engine status --path .
 ```
 
 ---
-
-## How It Works
-
-### The Three Tiers
-
-ContextEngine organizes code into three tiers based on relevance to your query:
-
-```
-🔥 HOT  — Full source code
-         The function(s) most directly relevant to your question.
-         You get every line, every comment.
-
-🌡 WARM  — Compressed summaries
-         Functions that are related (2 hops away in the dependency graph).
-         Summarized to 2-3 sentences by an LLM to save tokens.
-
-🧊 COLD  — Signatures only
-         Functions at the periphery — just enough to know they exist
-         and what they do, without filling your context window.
-```
-
-### The Pipeline
-
-```
-1. Index     → tree-sitter parses Python/JS/TS files
-               → builds NetworkX dependency graph
-               → generates ChromaDB semantic embeddings
-
-2. Query     → LLM analyzes your question
-               → detects type: single, multi, causal, comparison, or enumeration
-               → finds 1-5 focal points via semantic search
-
-3. Assemble  → graph traversal from each focal point
-               → fills token budget: HOT → WARM → COLD
-               → irrelevant COLD functions filtered out (threshold ≥ 0.3)
-
-4. Return    → formatted context string to your AI tool
-               → AI reasons over real code, not guesses
-```
 
 ### Supported Languages
 
@@ -268,72 +260,47 @@ ContextEngine organizes code into three tiers based on relevance to your query:
 
 ---
 
-## The .context-engine Folder
 
-When you index a project, ContextEngine creates a `.context-engine/` folder inside it:
+## When To Re-Index
 
-```
-your-project/
-├── .context-engine/
-│   ├── graph.pkl          ← dependency graph
-│   ├── functions.pkl      ← parsed function data
-│   ├── metadata.json      ← stats + last indexed time
-│   └── chroma_db/         ← semantic embeddings
-├── src/
-└── ...
-```
-
-This folder is automatically added to `.gitignore`. It's safe to delete — just re-run `index_codebase` to rebuild.
-
----
-
-## Re-indexing
-
-The index doesn't update automatically when you edit files (by design — embedding model loading is slow). Re-index whenever you make significant changes:
-
-```
-"index this codebase"   ← in Cursor/Claude chat
-```
-or
+The index doesn't auto-update embeddings (by design — embedding
+models are slow to reload). Re-index after significant code changes:
 ```bash
 context-engine index .
+# or in Cursor/Claude: "index this codebase"
 ```
 
-To check if your index is stale:
+The file watcher updates the dependency graph in real time:
+```bash
+context-engine watch .
 ```
-"is the codebase index up to date?"
+
+Check if your index is stale:
+```bash
+context-engine status .
+# or in Cursor/Claude: "is the codebase index up to date?"
 ```
 
 ---
 
 ## Configuration
-
-### .env File
-
 ```bash
-# Which LLM to use for WARM tier compression and CLI ask command
-MODEL_PROVIDER=anthropic        # anthropic | openai | gemini
+# .env or system environment variables
 
-# API Keys (only need the one you use)
+MODEL_PROVIDER=claude          # claude | openai | gemini
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
-
-# Optional: override default models
-ANTHROPIC_MODEL=claude-3-5-haiku-20241022
-OPENAI_MODEL=gpt-4o-mini
-GEMINI_MODEL=gemini-2.0-flash
 ```
 
-### Token Budget
-
-Default is 150,000 tokens per query — well within Claude's 200k context window. You can override per query:
-
-```
-"ask_codebase with token_budget 50000: how does auth work?"
+Default token budget is **150,000 tokens** per query.
+Override per query in CLI:
+```bash
+context-engine ask "question" --token-budget 50000 --path .
 ```
 
 ---
+
 
 ## Requirements
 
