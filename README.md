@@ -37,6 +37,16 @@ the right context. Nothing irrelevant. Nothing missing.
 
 ---
 
+## About
+[Install](#quick-start)
+[Usage](#using-with-cursor)
+[Demo](#see-it-in-action)
+[Requirements](#requirements)
+[Configuration](#configuration)
+[Troubleshooting](#troubleshooting)
+[License](#license)
+[Contributing](#contributing)
+
 ## See It In Action
 ```bash
 $ context-engine assemble "why does login fail after token expires?"
