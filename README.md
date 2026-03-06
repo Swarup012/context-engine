@@ -43,6 +43,8 @@ the right context. Nothing irrelevant. Nothing missing.
 6. [Troubleshooting](#troubleshooting)
 7. [License](#license)
 
+## Architecture
+![Context-engine](Context-engine.png)
 ## See It In Action
 ```bash
 $ context-engine assemble "why does login fail after token expires?"
