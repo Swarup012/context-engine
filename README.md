@@ -8,8 +8,8 @@
 
 ContextEngine is a static-analysis-powered context engine for AI coding tools.
 Most tools find relevant code through text similarity they find what looks like your query. ContextEngine finds what is connected to your query. It parses your codebase into a real dependency graph using tree-sitter, so when you ask about validateToken(), it automatically pulls in checkExpiry() and config.tokenSettings because it knows those are in the call chain, not because they look similar to your words.
-Because context is graph selected instead of file dumped, a typical query uses 2,000 — 5,000 tokens instead of the 15,000 — 50,000 tokens you get when whole files are included. That means faster responses, lower API costs, and less noise for the model to reason through.
-Context is assembled in three tiers: HOT (full source of directly relevant functions), WARM (AI-compressed summaries of related functions), and COLD (signatures only for peripheral code) — all within a strict token budget.
+Because context is graph selected instead of file dumped, a typical query uses 2,000 — 5,000 tokens instead of the 10,000 — 20,000 tokens you get when whole files are included. That means faster responses, lower API costs, and less noise for the model to reason through.
+
 Works as a CLI tool and as an MCP server that plugs natively into Cursor, Claude Desktop, and Claude Code.
 
 ---
