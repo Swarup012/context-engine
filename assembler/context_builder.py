@@ -8,13 +8,17 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 from assembler.compressor import compress_functions_parallel
+from assembler.smart_truncate import smart_truncate_batch
 from assembler.token_budget import count_tokens
 from llm.client import get_llm_client
 from models import AssembledContext, ContextChunk
 from query.understanding import analyze_query
+from query.heuristic_understanding import heuristic_query_analysis
 from retriever.graph_traversal import get_context_candidates, traverse_multi_focal
 from retriever.semantic_search import semantic_search
 from storage.index_store import load_index
+from models import QueryAnalysis
+
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +176,7 @@ def assemble_context(
     query: str,
     project_path: Path,
     token_budget: int = 150000,
+    use_llm: bool = True,
 ) -> AssembledContext:
     """
     Assemble context with hot/warm/cold tiers based on a query.
@@ -184,6 +189,9 @@ def assemble_context(
         query: The user's query string.
         project_path: Path to the indexed project.
         token_budget: Maximum number of tokens allowed (default 150k).
+        use_llm: Whether to use LLM for query understanding and compression.
+                 False uses heuristics (faster, free). True uses LLM (smarter).
+                 Default True for backward compatibility.
 
     Returns:
         AssembledContext with chunks, total_tokens, budget_used_percent,
@@ -193,42 +201,69 @@ def assemble_context(
     index_dir = project_path / ".context-engine"
     graph, functions, _ = load_index(index_dir)
 
-    # Step 2: Analyze query to identify focal points and complexity
-    try:
-        llm_adapter = get_llm_client()
-        query_analysis = analyze_query(query, project_path, llm_adapter)
+    # FAST PATH: Skip LLM for exact function name queries
+    query_lower = query.strip().lower()
+    exact_match = None
 
-        logger.info(
-            "Query analysis: type=%s, complex=%s, focal_points=%d",
-            query_analysis.query_type,
-            query_analysis.is_complex,
-            len(query_analysis.focal_points),
-        )
-    except Exception as e:
-        logger.warning("Query analysis failed: %s, using fallback single focal point", e)
-        # Fallback: use simple semantic search
-        search_results = semantic_search(query, project_path, top_k=1)
+    # Check exact qualified name match first
+    if query in functions:
+        exact_match = functions[query]
+    else:
+        # Check partial matches on function name or qualified name
+        matches = []
+        for qname, func in functions.items():
+            if query_lower == qname.lower() or query_lower == func.name.lower():
+                matches.append(func)
 
-        if not search_results:
-            return AssembledContext(
-                chunks=[],
-                total_tokens=0,
-                budget_used_percent=0.0,
-                focal_point="<none>",
-            )
+        if len(matches) == 1:
+            exact_match = matches[0]  # unambiguous — use fast path
+        elif len(matches) > 1:
+            exact_match = None  # ambiguous — fall through to LLM, let it decide
 
-        focal_score, focal_func = search_results[0]
-        focal_qualified_name = focal_func.qualified_name
 
-        from models import QueryAnalysis
-
+    if exact_match:
+        # Build QueryAnalysis manually — skip LLM entirely
         query_analysis = QueryAnalysis(
             query=query,
-            focal_points=[focal_qualified_name],
+            focal_points=[exact_match.qualified_name],
             query_type="single",
             concepts=[],
             is_complex=False,
         )
+    else:
+        # Step 2: Analyze query to identify focal points and complexity
+        if use_llm:
+            # Use LLM for smart query understanding (original behavior)
+            try:
+                llm_adapter = get_llm_client()
+                query_analysis = analyze_query(query, project_path, llm_adapter)
+
+                logger.info(
+                    "Query analysis (LLM): type=%s, complex=%s, focal_points=%d",
+                    query_analysis.query_type,
+                    query_analysis.is_complex,
+                    len(query_analysis.focal_points),
+                )
+            except Exception as e:
+                logger.warning("Query analysis failed: %s, falling back to heuristics", e)
+                query_analysis = heuristic_query_analysis(query, project_path)
+
+                logger.info(
+                    "Query analysis (heuristic fallback): type=%s, complex=%s, focal_points=%d",
+                    query_analysis.query_type,
+                    query_analysis.is_complex,
+                    len(query_analysis.focal_points),
+                )
+        else:
+            # Use heuristics, no LLM call (faster, free)
+            query_analysis = heuristic_query_analysis(query, project_path)
+
+            logger.info(
+                "Query analysis (heuristic): type=%s, complex=%s, focal_points=%d",
+                query_analysis.query_type,
+                query_analysis.is_complex,
+                len(query_analysis.focal_points),
+            )
 
     # Ensure we have at least one focal point
     if not query_analysis.focal_points:
@@ -293,7 +328,7 @@ def assemble_context(
     logger.info("Hot tier: %d chunks, %d tokens", len(chunks), hot_tokens)
 
     # ------------------------------------------------------------------
-    # WARM tier: LLM-compressed summaries
+    # WARM tier: LLM-compressed summaries or smart truncation
     # relevance_score: 0.7 for all WARM functions
     # ------------------------------------------------------------------
     warm_chunks: list[ContextChunk] = []
@@ -302,71 +337,70 @@ def assemble_context(
     warm_funcs = [functions[qn] for qn in warm_candidates if qn in functions]
 
     if warm_funcs:
-        try:
-            llm_adapter = get_llm_client()
+        if use_llm:
+            # Use LLM for smart compression (original behavior)
+            try:
+                llm_adapter = get_llm_client()
 
-            logger.info("Compressing %d WARM tier functions...", len(warm_funcs))
-            compressions = compress_functions_parallel(
-                warm_funcs,
-                llm_adapter,
-                index_dir,
-                use_cache=True,
-            )
+                logger.info("Compressing %d WARM tier functions with LLM...", len(warm_funcs))
+                compressions = compress_functions_parallel(
+                    warm_funcs,
+                    llm_adapter,
+                    index_dir,
+                    use_cache=True,
+                )
+
+                for func in warm_funcs:
+                    if func.qualified_name not in compressions:
+                        continue
+
+                    compressed_content, was_cached = compressions[func.qualified_name]
+                    token_count = count_tokens(compressed_content)
+
+                    if warm_tokens + token_count <= warm_budget_limit:
+                        chunk = ContextChunk(
+                            node=func,
+                            tier="warm",
+                            content=compressed_content,
+                            token_count=token_count,
+                            relevance_score=0.7,
+                        )
+                        chunk.was_cached = was_cached
+                        warm_chunks.append(chunk)
+                        warm_tokens += token_count
+                    else:
+                        break  # Warm budget exhausted
+
+            except Exception as e:
+                logger.warning("Failed to compress WARM tier: %s, falling back to smart truncate", e)
+                # Fall through to smart truncation below
+                use_llm = False
+
+        if not use_llm:
+            # Use smart truncation without LLM
+            logger.info("Compressing %d WARM tier functions with smart truncation...", len(warm_funcs))
+            compressions = smart_truncate_batch(warm_funcs, max_lines_per_func=6)
 
             for func in warm_funcs:
                 if func.qualified_name not in compressions:
                     continue
 
-                compressed_content, was_cached = compressions[func.qualified_name]
-                token_count = count_tokens(compressed_content)
+                truncated_content = compressions[func.qualified_name]
+                token_count = count_tokens(truncated_content)
 
                 if warm_tokens + token_count <= warm_budget_limit:
                     chunk = ContextChunk(
                         node=func,
                         tier="warm",
-                        content=compressed_content,
+                        content=truncated_content,
                         token_count=token_count,
                         relevance_score=0.7,
                     )
-                    chunk.was_cached = was_cached
+                    chunk.was_cached = False  # Smart truncate has no cache
                     warm_chunks.append(chunk)
                     warm_tokens += token_count
                 else:
                     break  # Warm budget exhausted
-
-        except Exception as e:
-            logger.warning("Failed to compress WARM tier: %s, falling back to truncation", e)
-
-            # Fallback: truncation
-            for qualified_name in warm_candidates:
-                if qualified_name not in functions:
-                    continue
-
-                func = functions[qualified_name]
-
-                content_parts = []
-                if func.docstring:
-                    content_parts.append(f'"""{func.docstring}"""')
-
-                source_lines = func.source_code.split("\n")[:5]
-                content_parts.extend(source_lines)
-
-                content = "\n".join(content_parts)
-                token_count = count_tokens(content)
-
-                if warm_tokens + token_count <= warm_budget_limit:
-                    chunk = ContextChunk(
-                        node=func,
-                        tier="warm",
-                        content=content,
-                        token_count=token_count,
-                        relevance_score=0.7,
-                    )
-                    chunk.was_cached = False
-                    warm_chunks.append(chunk)
-                    warm_tokens += token_count
-                else:
-                    break
 
     chunks.extend(warm_chunks)
     logger.info("Warm tier: %d chunks, %d tokens", len(warm_chunks), warm_tokens)

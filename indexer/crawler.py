@@ -33,7 +33,7 @@ def crawl_directory(directory: Path) -> list[Path]:
     # Directories to skip
     skip_dirs = {
         "__pycache__", "node_modules", ".next", "dist", "build", ".git",
-        "out", "coverage", ".nuxt", ".vite", "vendor", ".venv"
+        "out", "coverage", ".nuxt", ".vite", "vendor", ".venv", ".context-engine"
     }
     
     # Supported file extensions

@@ -1,14 +1,3 @@
-"""MCP Server for ContextEngine.
-
-Exposes ContextEngine as an MCP (Model Context Protocol) server so Claude Desktop,
-Cursor, and any MCP-compatible tool can use it natively.
-
-Tools exposed:
-- index_codebase: Index a project directory
-- ask_codebase: Assemble intelligent context for a query
-- get_codebase_status: Get index status for a project
-"""
-
 import logging
 import os
 from datetime import datetime
@@ -17,39 +6,80 @@ from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-# Load environment variables (.env for local dev, system env for global installs)
+
 if Path(".env").exists():
     load_dotenv()
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# The working directory where Claude Code was launched — used as the default project path
-_CLIENT_CWD = os.environ.get("PWD") or os.getcwd()
 
-# Create the MCP server
+# _CLIENT_CWD = os.environ.get("PWD") or os.getcwd()
+ACTIVE_PROJECT_FILE = Path.home() / ".context-engine-active"
+
+def resolve_project_path(path: str) -> Path:
+    """
+    Resolve the project directory consistently across MCP tools.
+
+    Priority:
+    1. Explicit path passed to tool
+    2. Current working directory if it contains a .context-engine index
+    3. Last indexed project stored in ~/.context-engine-active
+    """
+
+    
+    if path and path.strip():
+        resolved = Path(path).resolve()
+        if not resolved.exists():
+            raise ValueError(f"Path does not exist: {resolved}")
+        return resolved
+
+    
+    cwd = Path.cwd()
+    if (cwd / ".context-engine").exists():
+        return cwd.resolve()
+
+    
+    if ACTIVE_PROJECT_FILE.exists():
+        stored = ACTIVE_PROJECT_FILE.read_text().strip()
+        stored_path = Path(stored)
+        if stored_path.exists():
+            return stored_path.resolve()
+
+    raise ValueError(
+        "No project found. Run index_codebase() first."
+    )
+
+
 mcp = FastMCP(
     "ContextEngine",
-    instructions=(
-        "ContextEngine gives you deep, accurate access to any indexed codebase. "
-        "ALWAYS use these tools when answering questions about code, architecture, "
-        "functions, bugs, or how something works in a project. "
-        "Do NOT answer code questions from memory — always call ask_codebase first. "
-        "Workflow: "
-        "(1) If not indexed yet, call index_codebase first. "
-        "(2) For ANY question about the codebase, call ask_codebase with the user's question. "
-        "(3) Use get_codebase_status to check if the index is up to date. "
-        f"Current project directory: {_CLIENT_CWD}. "
-        "Use this path for all tool calls unless the user specifies a different path."
-    ),
+    instructions="""
+ContextEngine provides structured context from an indexed codebase.
+
+Primary tool: analyze_codebase
+
+Rules:
+1. ALWAYS call analyze_codebase when answering questions about code, architecture, bugs, or how something works.
+2. If the project is not indexed yet, call index_project first.
+3. Use find_code to locate functions, routes, commands, or concepts.
+4. Use show_function_source to display the full source code of a function.
+5. Use explain_file_structure to understand what a file does.
+6. Use find_callers to see which functions depend on another function.
+7. Use check_index_status to verify whether the codebase index is up to date.
+
+Never answer code questions from memory — always use these tools first.
+
+The project directory is detected automatically unless a path is explicitly provided.
+""",
 )
 
 
-# ---------------------------------------------------------------------------
-# Tool 1: index_codebase
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+    name="index_project",
+    description="Index a project so ContextEngine can understand the codebase."
+)
 def index_codebase(path: str = "") -> str:
     """Index a codebase to enable intelligent context retrieval.
 
@@ -75,15 +105,10 @@ def index_codebase(path: str = "") -> str:
     from indexer.embedder import generate_embeddings
     from storage.index_store import save_index
 
-    # If no path given (or model passed garbage), fall back to the client's CWD
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved)
+    project_path = resolve_project_path(path)
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not project_path.is_dir():
         raise ValueError(f"Path is not a directory: {path}")
@@ -99,6 +124,7 @@ def index_codebase(path: str = "") -> str:
 
     # Generate and store semantic embeddings
     generate_embeddings(functions, index_dir, show_progress=False)
+    ACTIVE_PROJECT_FILE.write_text(str(project_path))
 
     # Compute summary stats
     files_indexed = len(set(str(func.file_path) for func in functions.values()))
@@ -111,12 +137,30 @@ def index_codebase(path: str = "") -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Tool 2: ask_codebase
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
-def ask_codebase(query: str, path: str = "", token_budget: int = 150000) -> str:
+
+@mcp.tool(
+    name="analyze_codebase",
+    description="""
+Primary tool for understanding a codebase.
+
+Use this for questions like:
+- "how does authentication work?"
+- "why does login fail?"
+- "explain the architecture"
+- "where is OAuth implemented?"
+- "how does caching interact with auth?"
+
+This tool retrieves the most relevant code using ContextEngine's graph traversal and semantic search.
+"""
+)
+def ask_codebase(
+    query: str | None = None,
+    question: str | None = None,
+    prompt: str | None = None,
+    path: str = "",
+    token_budget: int = 150000
+) -> str:
     """Ask a question about an indexed codebase and get assembled context.
 
     Call this tool for ANY question about code in the current project, including:
@@ -148,33 +192,38 @@ def ask_codebase(query: str, path: str = "", token_budget: int = 150000) -> str:
         Formatted context string with HOT/WARM/COLD sections plus metadata
         about focal points found, tokens used, and query type.
     """
+    query = query or question or prompt
+
+    if not query:
+        raise ValueError(
+            "Missing query parameter. Provide 'query', 'question', or 'prompt'."
+        )
+    query = query.strip()
+    
     from assembler.context_builder import assemble_context, format_context_for_llm
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         raise ValueError(
             f"No index found at {index_dir}. "
-            f"Run index_codebase('{path}') first."
+            "Run index_project() first."
         )
 
     # Run full assembly pipeline
-    assembled = assemble_context(query, project_path, token_budget=token_budget)
+    # Use heuristic approach for MCP: no LLM calls, faster and free
+    assembled = assemble_context(query, project_path, token_budget=token_budget, use_llm=False)
 
     if not assembled.chunks:
         return (
             f"No relevant context found for query: {query}\n\n"
             "The index may be empty or the query doesn't match any indexed functions. "
-            "Try re-indexing with index_codebase() or rephrasing the query."
+            "Try re-indexing with index_project()"
         )
 
     # Format context into sections
@@ -224,11 +273,19 @@ def ask_codebase(query: str, path: str = "", token_budget: int = 150000) -> str:
     return "\n".join(meta_lines) + formatted
 
 
-# ---------------------------------------------------------------------------
-# Tool 3: get_codebase_status
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+    name="check_index_status",
+    description="""
+Check whether a project has been indexed.
+
+Examples:
+- "is the project indexed?"
+- "how many files are indexed?"
+- "when was the index last updated?"
+"""
+)
 def get_codebase_status(path: str = "") -> str:
     """Get the current index status of a codebase.
 
@@ -252,20 +309,16 @@ def get_codebase_status(path: str = "") -> str:
     from storage.index_store import load_index
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         return (
             f"No index found for: {path}\n"
-            "Run index_codebase() to create an index."
+            "Run index_project() to create an index."
         )
 
     try:
@@ -321,18 +374,27 @@ def get_codebase_status(path: str = "") -> str:
         if len(stale_files) > 10:
             lines.append(f"  ... and {len(stale_files) - 10} more")
         lines.append("")
-        lines.append("Run index_codebase() to refresh the index.")
+        lines.append("Run index_project() to refresh the index.")
     else:
         lines.append("✓ Index is up to date.")
 
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Tool 4: search_codebase
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+    name="find_code",
+    description="""
+Search the codebase for functions or concepts.
+
+Examples:
+- "find auth middleware"
+- "where is rate limiting implemented"
+- "find payment service"
+- "show login handler"
+"""
+)
 def search_codebase(query: str, path: str = "", top_k: int = 10) -> str:
     """Search the codebase for functions, commands, routes, or any concept.
 
@@ -358,20 +420,16 @@ def search_codebase(query: str, path: str = "", top_k: int = 10) -> str:
     from retriever.semantic_search import semantic_search
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         raise ValueError(
             f"No index found at {index_dir}. "
-            f"Run index_codebase first."
+            f"Run index_project() first."
         )
 
     # Cap top_k at 20
@@ -399,7 +457,7 @@ def search_codebase(query: str, path: str = "", top_k: int = 10) -> str:
         sig = func.signature or f"function {func.name}(...)"
 
         lines.append(f"{rank}. {func.qualified_name}")
-        lines.append(f"   File: {rel_path}:{func.start_line}")
+        lines.append(f"   File: {rel_path}:{func.line_start}")
         lines.append(f"   Signature: {sig}")
         lines.append(f"   Relevance: {score:.0%}")
         if func.docstring:
@@ -411,11 +469,19 @@ def search_codebase(query: str, path: str = "", top_k: int = 10) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Tool 5: get_function_source
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+    name="show_function_source",
+    description="""
+Show the full source code of a function.
+
+Examples:
+- "show validateToken"
+- "open compressCommand function"
+- "display code for authenticateUser"
+"""
+)
 def get_function_source(function_name: str, path: str = "") -> str:
     """Get the full source code of a specific function by name.
 
@@ -440,20 +506,16 @@ def get_function_source(function_name: str, path: str = "") -> str:
     from storage.index_store import load_index
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         raise ValueError(
             f"No index found at {index_dir}. "
-            f"Run index_codebase first."
+            f"Run index_project() first."
         )
 
     _, functions, _ = load_index(index_dir)
@@ -508,11 +570,19 @@ def get_function_source(function_name: str, path: str = "") -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Tool 6: explain_file
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+    name="explain_file_structure",
+    description="""
+Explain the structure of a file.
+
+Examples:
+- "explain auth.py"
+- "what does database.ts do?"
+- "show structure of middleware file"
+"""
+)
 def explain_file(file_path: str, path: str = "") -> str:
     """Get a structural overview of a specific file in the codebase.
 
@@ -537,20 +607,16 @@ def explain_file(file_path: str, path: str = "") -> str:
     from storage.index_store import load_index
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         raise ValueError(
             f"No index found at {index_dir}. "
-            f"Run index_codebase first."
+            f"Run index_project() first."
         )
 
     _, functions, _ = load_index(index_dir)
@@ -635,11 +701,20 @@ def explain_file(file_path: str, path: str = "") -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Tool 7: find_dependents
-# ---------------------------------------------------------------------------
 
-@mcp.tool()
+
+@mcp.tool(
+     name="find_callers",
+    description="""
+Find which functions call another function.
+
+Examples:
+- "who calls validateToken"
+- "where is authenticateUser used"
+- "what depends on checkExpiry"
+- "find callers of compressCommand"
+"""
+)
 def find_dependents(function_name: str, path: str = "") -> str:
     """Find all functions that call or depend on a specific function.
 
@@ -665,20 +740,16 @@ def find_dependents(function_name: str, path: str = "") -> str:
     from storage.index_store import load_index
 
     # Fall back to client CWD if model passed nothing or garbage
-    resolved = path.strip() if path else ""
-    if not resolved or not Path(resolved).exists():
-        resolved = _CLIENT_CWD
-
-    project_path = Path(resolved).resolve()
+    project_path = resolve_project_path(path)
     index_dir = project_path / ".context-engine"
 
     if not project_path.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
+        raise ValueError(f"Path does not exist: {project_path}")
 
     if not index_dir.exists():
         raise ValueError(
             f"No index found at {index_dir}. "
-            f"Run index_codebase first."
+            f"Run index_project() first."
         )
 
     graph, functions, _ = load_index(index_dir)
@@ -776,9 +847,7 @@ def find_dependents(function_name: str, path: str = "") -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Run the MCP server (stdio transport for Claude Desktop / Cursor)."""
